@@ -9,7 +9,7 @@ This project uses **Poetry** for dependency management and **Django** as the bac
 - Python 3.14+
 - Poetry
 
-Install Poetry if missing:
+Install Poetry if missing,
 
 ```bash
 pip install poetry

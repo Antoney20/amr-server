@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.db import models
 from django.core.validators import MinLengthValidator
@@ -6,14 +7,12 @@ from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 # from auditlog.registry import auditlog
  
-class UserRole:
-    ADMIN  = "admin"
-    STAFF  = "staff"
-    USER   = "user"
-
-    ALL_ROLES = [ADMIN, STAFF, USER]
-
-
+class UserRole(models.TextChoices):
+    ADMIN     = "admin",     "Admin"
+    NATIONAL  = "national",  "National Coordinator"
+    LAB       = "lab",       "Lab User"
+    FACILITY  = "facility",  "Facility User"
+    VIEWER    = "viewer",    "Viewer"
 
 class UserStatus(models.TextChoices):
     ACTIVE   = "active",   _("Active")
@@ -107,6 +106,12 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_email_verified = models.BooleanField(default=False)
 
     verification_token = models.CharField(max_length=100, blank=True, null=True)
+    
+    
+    invite_token    = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    invited_by      = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name="invited_users")
+    invited_at      = models.DateTimeField(null=True, blank=True)
+    invite_expires_at = models.DateTimeField(null=True, blank=True)
 
     objects = CustomUserManager()
 
@@ -141,3 +146,61 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     def is_staff_member(self):
         return self.has_role(UserRole.STAFF) or self.is_staff or self.is_superuser
 
+
+
+class EmailLog(models.Model):
+    STATUS_CHOICES = [
+        ('initial', 'Initial'),
+        ('sending', 'Sending'),
+        ('sent', 'Sent'),
+        ('failed', 'Failed'),
+    ]
+
+    subject = models.TextField()
+    message = models.TextField(blank=True, null=True)
+    sender = models.CharField(
+        max_length=255,
+        default=settings.DEFAULT_FROM_EMAIL
+    )
+    recipient = models.TextField(help_text="Receiver email address")
+    category = models.CharField(max_length=50, default='other')
+    status = models.CharField(
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default='initial'
+    )
+    error_message = models.TextField(blank=True, null=True)
+    retry_count = models.PositiveIntegerField(default=0)
+    last_attempt = models.DateTimeField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    sent_at = models.DateTimeField(blank=True, null=True)
+
+    def mark_sending(self):
+        self.status = 'sending'
+        self.last_attempt = timezone.now()
+        self.save(update_fields=['status', 'last_attempt'])
+
+    def mark_sent(self):
+        self.status = 'sent'
+        self.sent_at = timezone.now()
+        self.error_message = None
+        self.save(update_fields=['status', 'sent_at', 'error_message'])
+
+    def mark_failed(self, exc):
+        self.status = 'failed'
+        self.error_message = str(exc)
+        self.retry_count += 1
+        self.last_attempt = timezone.now()
+        self.save(
+            update_fields=[
+                'status',
+                'error_message',
+                'retry_count',
+                'last_attempt'
+            ]
+        )
+
+    def __str__(self):
+        return f"[{self.category}] {self.subject} → {self.recipient} ({self.status})"
+    

@@ -1,0 +1,20 @@
+{% extends "emails/base.html" %}
+
+{% block header_title %}Account Activated{% endblock %}
+
+{% block content %}
+<p>Your account on the <strong>National AMR Programme</strong> platform has been successfully activated.</p>
+
+<div class="info-box">
+    You can now log in and access your assigned modules and data.
+</div>
+
+<div class="button-container">
+    <a href="{{ login_url }}" class="button">Log In Now</a>
+</div>
+
+<p style="font-size:13px; color:#888;">
+    If you did not create this account or believe this was in error,
+    please contact us immediately at <a href="mailto:{{ support_email }}">{{ support_email }}</a>.
+</p>
+{% endblock %}

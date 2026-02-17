@@ -1,0 +1,26 @@
+{% extends "emails/base.html" %}
+
+{% block header_title %}You Have Been Invited{% endblock %}
+
+{% block content %}
+<p>
+    You have been invited{% if invited_by %} by <strong>{{ invited_by }}</strong>{% endif %}
+    to join the <strong>National AMR Programme</strong> platform.
+</p>
+
+<p>Click the button below to accept your invitation and set up your account.</p>
+
+<div class="button-container">
+    <a href="{{ invite_link }}" class="button">Accept Invitation</a>
+</div>
+
+{% if expires_at %}
+<div class="warning">
+    <strong>Note:</strong> This invitation expires on
+    <strong>{{ expires_at|date:"F j, Y, g:i a" }}</strong>. Please accept it before then.
+</div>
+{% endif %}
+
+<p style="font-size:13px; color:#888;">If the button doesn't work, copy and paste this link into your browser:</p>
+<div class="link-box">{{ invite_link }}</div>
+{% endblock %}

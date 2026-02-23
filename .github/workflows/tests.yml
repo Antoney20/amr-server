@@ -1,0 +1,41 @@
+# name: Tests
+
+# on: [push, pull_request]
+
+# jobs:
+#   test:
+#     runs-on: ubuntu-latest
+
+
+#     env:
+#       # MSSQL warehouse is not available in CI — pipeline falls back to empty list
+#       MSSQL_HOST: ""
+#       MSSQL_DB: ""
+#       MSSQL_USER: ""
+#       MSSQL_PASSWORD: ""
+
+#     steps:
+#       - uses: actions/checkout@v4
+
+#       - uses: actions/setup-python@v5
+#         with:
+#           python-version: "3.12"
+#           cache: "pip"
+
+#       - name: Install Poetry
+#         run: pip install poetry
+
+#       - name: Install dependencies
+#         run: poetry install --with dev --sync
+
+#       - name: Run migrations
+#         run: poetry run python manage.py migrate --no-input
+
+#       - name: Run tests
+#         run: poetry run pytest --cov=app --cov-report=xml --cov-report=term-missing -q
+
+#       - name: Upload coverage
+#         uses: codecov/codecov-action@v4
+#         with:
+#           file: coverage.xml
+#         continue-on-error: true

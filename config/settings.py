@@ -109,6 +109,9 @@ DATABASES["warehouse"] = {
         "trust_server_certificate": True,
     },
 }
+MIGRATION_MODULES = {
+    "warehouse": None,
+}
 
 DATABASE_ROUTERS = [
     "core.db_router.WarehouseRouter",

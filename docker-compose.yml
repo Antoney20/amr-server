@@ -1,0 +1,26 @@
+services:
+  web:
+    build:
+      context: .
+      target: runtime
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+      - sqlite_data:/app/data          
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DJANGO_ENV: development
+
+      # ---- SQLITE (DEFAULT DB) ----
+      SQLITE_PATH: /app/data/db.sqlite3
+
+      # ---- MSSQL WAREHOUSE (READ ONLY) ----
+      MSSQL_DB: ${MSSQL_DB}
+      MSSQL_USER: ${MSSQL_USER}
+      MSSQL_PASSWORD: ${MSSQL_PASSWORD}
+      MSSQL_HOST: ${MSSQL_HOST}
+
+volumes:
+  sqlite_data:

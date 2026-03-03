@@ -40,7 +40,9 @@ CSRF_COOKIE_SAMESITE = 'Lax'
 
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",  
-    "https://localhost:3000"
+    "https://localhost:3000",
+    'https://test-amr-app.vercel.app',
+    'http://test-amr-app.vercel.app/'
     
 
 
@@ -63,6 +65,8 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000', 
     'https://localhost:3000', 
+    'https://test-amr-app.vercel.app',
+    'http://test-amr-app.vercel.app/'
     
     
 ]

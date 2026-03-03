@@ -32,7 +32,7 @@ SECRET_KEY = 'django-insecure-^k-(ymlchurg)6uysqe@pp7#oyi)%^k*6tuvbrj$&5)zh_wu*p
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['amr.cema.africa', '127.0.0.1']
 
 # Django security settings
 SECURE_BROWSER_XSS_FILTER = True

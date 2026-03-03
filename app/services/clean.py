@@ -316,7 +316,7 @@ def _is_realistic_date(d: date | None) -> bool:
     """
     Return True if the date is plausible for specimen collection/testing.
 
-    A date is unrealistic if it is before year 2000 or after today.
+    A date is unrealistic if it is before year 2018 or after today.
 
     Args:
         d: date to check.
@@ -329,7 +329,7 @@ def _is_realistic_date(d: date | None) -> bool:
     try:
         today = date.today()
         # Guard against pandas NaT or other non-standard date objects
-        return date(2000, 1, 1) <= d <= today
+        return date(2018, 1, 1) <= d <= today
     except (TypeError, ValueError):
         return False
 
@@ -378,7 +378,7 @@ def build_specimen_date(row: dict) -> dict:
         3. TIME_POSTED      — if present and realistic
         4. Empty string     — no usable date found
 
-    "Realistic" means between 2000-01-01 and today.  Dates like 1900-01-01 or
+    "Realistic" means between 2018-01-01 and today.  Dates like 1900-01-01 or
     2050-01-01 are rejected and the next candidate is tried.
 
     Strips the time component so the output is always ``"DD/MM/YYYY"`` or ``""``.

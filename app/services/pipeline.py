@@ -11,13 +11,23 @@ Entry point for the AMR data pipeline.  Coordinates:
 import logging
 import time
 from dataclasses import dataclass, field, asdict
-from datetime import date
-from typing import Any
+from datetime import date, datetime
+from typing import Any,  Optional
+
+import threading
+
+
 
 from app.conn import fetch_warehouse_data
 
 logger = logging.getLogger(__name__)
 
+
+
+_pipeline_cache: Optional["PipelineResult"] = None
+_pipeline_lock  = threading.Lock()
+_refresh_thread: Optional[threading.Thread] = None
+_CACHE_TTL_SECONDS = 60 * 60 * 5 
 # ---------------------------------------------------------------------------
 # TTL in-process cache (avoids hammering the warehouse on every request)
 # ---------------------------------------------------------------------------
@@ -38,6 +48,82 @@ def _cache_get(key: str) -> Any | None:
 
 def _cache_set(key: str, value: Any, ttl: int = _CACHE_TTL_SECONDS) -> None:
     _cache[key] = (value, time.monotonic() + ttl)
+
+
+def _is_stale() -> bool:
+    if _pipeline_cache is None:
+        return True
+    try:
+        fetched = datetime.fromisoformat(_pipeline_cache.fetched_at)
+        return (datetime.now() - fetched).total_seconds() > _CACHE_TTL_SECONDS
+    except Exception:
+        return True
+    
+def _run_pipeline_sync() -> "PipelineResult":
+    """Core pipeline — runs in background thread or on first boot."""
+    global _pipeline_cache
+
+    result = PipelineResult(fetched_at=datetime.now().isoformat())
+    errors: list[str] = []
+
+    # Step 1: Fetch
+    try:
+        raw_rows = fetch_warehouse_data()
+    except Exception as exc:
+        msg = f"Fetch failed: {exc}"
+        logger.error(msg, exc_info=True)
+        result.errors.append(msg)
+        return result
+
+    if not raw_rows:
+        result.errors.append("Fetch returned 0 rows.")
+        return result
+
+    # Step 2: Clean
+    try:
+        from app.services.clean import clean_records
+        cleaned = clean_records(raw_rows)
+    except Exception as exc:
+        msg = f"Cleaning failed: {exc}"
+        logger.error(msg, exc_info=True)
+        result.errors.append(msg)
+        return result
+
+    # Step 3: Transform (bulk, no per-row try/catch overhead)
+    transformed: list[dict] = []
+    for row in cleaned:
+        try:
+            transformed.append(_transform_record(row))
+        except Exception as exc:
+            errors.append(f"Transform error: {exc}")
+
+    # Step 4: Flags
+    result.records   = transformed
+    result.total     = len(transformed)
+    result.flags     = _compute_flags(transformed)
+    result.errors    = errors
+
+    logger.info("Pipeline complete — %d records, %d errors", result.total, len(errors))
+
+    with _pipeline_lock:
+        _pipeline_cache = result
+
+    return result
+
+def _refresh_in_background() -> None:
+    """Fire-and-forget background refresh — never blocks a request."""
+    global _refresh_thread
+
+    with _pipeline_lock:
+        if _refresh_thread and _refresh_thread.is_alive():
+            logger.debug("Background refresh already running, skipping.")
+            return
+        t = threading.Thread(target=_run_pipeline_sync, daemon=True, name="amr-pipeline-refresh")
+        _refresh_thread = t
+
+    t.start()
+    logger.info("Background pipeline refresh started.")
+
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +198,35 @@ def _compute_flags(records: list[dict]) -> dict:
     return flags
 
 
+# def _transform_record(row: dict) -> dict:
+#     """
+#     Project a cleaned row into the canonical JSON response shape.
+
+#     Includes only the fields needed by the analysis layer.  Raw warehouse
+#     columns are excluded to keep response payloads lean.
+
+#     Args:
+#         row (dict): A cleaned row from ``clean.clean_records()``.
+
+#     Returns:
+#         dict: Record with keys:
+#             facility_name, county, specimen, specimen_date,
+#             specimen_date_flag, organism, organism_flag,
+#             gender, age
+#     """
+#     return {
+#         "facility_name":      row.get("facility_name", ""),
+#         "county":             row.get("county", ""),
+#         "specimen":           row.get("specimen", ""),
+#         "specimen_date":      row.get("specimen_date", ""),
+#         "specimen_date_flag": bool(row.get("specimen_date_flag", False)),
+#         "organism":           row.get("organism", ""),
+#         "organism_flag":      bool(row.get("organism_flag", False)),
+#         "gender":             row.get("gender", "Unknown"),
+#         "age":                row.get("AGE"),
+#     }
+
+
 def _transform_record(row: dict) -> dict:
     """
     Project a cleaned row into the canonical JSON response shape.
@@ -128,106 +243,144 @@ def _transform_record(row: dict) -> dict:
             specimen_date_flag, organism, organism_flag,
             gender, age
     """
-    return {
-        "facility_name":      row.get("facility_name", ""),
-        "county":             row.get("county", ""),
-        "specimen":           row.get("specimen", ""),
-        "specimen_date":      row.get("specimen_date", ""),
-        "specimen_date_flag": bool(row.get("specimen_date_flag", False)),
-        "organism":           row.get("organism", ""),
-        "organism_flag":      bool(row.get("organism_flag", False)),
-        "gender":             row.get("gender", "Unknown"),
-        "age":                row.get("AGE"),
-    }
+    def safe_age(val):
+        """Convert age to int or None."""
+        if val is None or val == "":
+            return None
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return None
 
+    return {
+        "facility_name":      str(row.get("facility_name") or "").strip(),
+        "county":             str(row.get("county") or "").strip(),
+        "specimen":           str(row.get("specimen") or "").strip(),
+        "specimen_date":      str(row.get("specimen_date") or "").strip(),
+        "specimen_date_flag": bool(row.get("specimen_date_flag", False)),
+        "organism":           str(row.get("organism") or "").strip(),
+        "organism_flag":      bool(row.get("organism_flag", False)),
+        "gender":             str(row.get("gender") or "Unknown").strip(),
+        "age":                safe_age(row.get("AGE")),  # ← Safe int conversion
+    }
 
 # ---------------------------------------------------------------------------
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
-def run_pipeline(force_refresh: bool = False) -> PipelineResult:
-    """
-    Execute the full AMR data pipeline and return a ``PipelineResult``.
+# def run_pipeline(force_refresh: bool = False) -> PipelineResult:
+#     """
+#     Execute the full AMR data pipeline and return a ``PipelineResult``.
 
-    Steps:
-        1. Check in-process TTL cache (skip if ``force_refresh=True``).
-        2. Fetch raw rows from the warehouse via ``conn.fetch_warehouse_data()``.
-        3. Clean rows via ``clean.clean_records()``.
-        4. Transform each row to the canonical response shape.
-        5. Compute aggregate data-quality flags.
-        6. Cache the result and return.
+#     Steps:
+#         1. Check in-process TTL cache (skip if ``force_refresh=True``).
+#         2. Fetch raw rows from the warehouse via ``conn.fetch_warehouse_data()``.
+#         3. Clean rows via ``clean.clean_records()``.
+#         4. Transform each row to the canonical response shape.
+#         5. Compute aggregate data-quality flags.
+#         6. Cache the result and return.
 
-    The DB connection is held only during step 2 (fetch).  Steps 3–5 are
-    pure Python and do not touch the DB.
+#     The DB connection is held only during step 2 (fetch).  Steps 3–5 are
+#     pure Python and do not touch the DB.
 
-    Args:
-        force_refresh (bool): If True, bypass the cache and re-fetch from DB.
-                              Useful for scheduled refresh jobs.
+#     Args:
+#         force_refresh (bool): If True, bypass the cache and re-fetch from DB.
+#                               Useful for scheduled refresh jobs.
 
-    Returns:
-        PipelineResult: Contains ``records``, ``total``, ``fetched_at``,
-                        ``flags``, and ``errors``.
+#     Returns:
+#         PipelineResult: Contains ``records``, ``total``, ``fetched_at``,
+#                         ``flags``, and ``errors``.
 
-    Raises:
-        Does not raise — errors are caught, logged, and included in
-        ``PipelineResult.errors``.  An empty ``PipelineResult`` is returned
-        on total failure.
-    """
-    cache_key = "amr_pipeline_result"
-    if not force_refresh:
-        cached = _cache_get(cache_key)
-        if cached is not None:
-            logger.debug("Pipeline: returning cached result (%d records).", cached.total)
-            return cached
+#     Raises:
+#         Does not raise — errors are caught, logged, and included in
+#         ``PipelineResult.errors``.  An empty ``PipelineResult`` is returned
+#         on total failure.
+#     """
+#     cache_key = "amr_pipeline_result"
+#     if not force_refresh:
+#         cached = _cache_get(cache_key)
+#         if cached is not None:
+#             logger.debug("Pipeline: returning cached result (%d records).", cached.total)
+#             return cached
 
-    result = PipelineResult(fetched_at=date.today().isoformat())
-    errors: list[str] = []
+#     result = PipelineResult(fetched_at=date.today().isoformat())
+#     errors: list[str] = []
 
-    # --- Step 1: Fetch -------------------------------------------------------
-    try:
+#     # --- Step 1: Fetch -------------------------------------------------------
+#     try:
     
-        raw_rows = fetch_warehouse_data()
-    except Exception as exc:
-        msg = f"Fetch failed: {exc}"
-        logger.error(msg, exc_info=True)
-        result.errors.append(msg)
-        return result
+#         raw_rows = fetch_warehouse_data()
+#     except Exception as exc:
+#         msg = f"Fetch failed: {exc}"
+#         logger.error(msg, exc_info=True)
+#         result.errors.append(msg)
+#         return result
 
-    if not raw_rows:
-        result.errors.append("Fetch returned 0 rows — check warehouse connectivity.")
-        return result
+#     if not raw_rows:
+#         result.errors.append("Fetch returned 0 rows — check warehouse connectivity.")
+#         return result
 
-    # --- Step 2: Clean -------------------------------------------------------
-    try:
-        from app.services.clean import clean_records
-        cleaned = clean_records(raw_rows)
-    except Exception as exc:
-        msg = f"Cleaning failed: {exc}"
-        logger.error(msg, exc_info=True)
-        result.errors.append(msg)
-        return result
+#     # --- Step 2: Clean -------------------------------------------------------
+#     try:
+#         from app.services.clean import clean_records
+#         cleaned = clean_records(raw_rows)
+#     except Exception as exc:
+#         msg = f"Cleaning failed: {exc}"
+#         logger.error(msg, exc_info=True)
+#         result.errors.append(msg)
+#         return result
 
-    # --- Step 3: Transform ---------------------------------------------------
-    transformed: list[dict] = []
-    for row in cleaned:
-        try:
-            transformed.append(_transform_record(row))
-        except Exception as exc:
-            errors.append(f"Transform error on row: {exc}")
+#     # --- Step 3: Transform ---------------------------------------------------
+#     transformed: list[dict] = []
+#     for row in cleaned:
+#         try:
+#             transformed.append(_transform_record(row))
+#         except Exception as exc:
+#             errors.append(f"Transform error on row: {exc}")
 
-    # --- Step 4: Flags -------------------------------------------------------
-    result.records = transformed
-    result.total = len(transformed)
-    result.flags = _compute_flags(transformed)
-    result.errors = errors
+#     # --- Step 4: Flags -------------------------------------------------------
+#     result.records = transformed
+#     result.total = len(transformed)
+#     result.flags = _compute_flags(transformed)
+#     result.errors = errors
 
-    logger.info(
-        "Pipeline complete — %d records, flags=%s, errors=%d",
-        result.total, result.flags, len(errors),
-    )
+#     logger.info(
+#         "Pipeline complete — %d records, flags=%s, errors=%d",
+#         result.total, result.flags, len(errors),
+#     )
 
-    _cache_set(cache_key, result)
-    return result
+#     _cache_set(cache_key, result)
+#     return result
+
+
+def run_pipeline(force_refresh: bool = False) -> "PipelineResult":
+    """
+    Returns a PipelineResult in ~0ms if cache is warm.
+
+    Behaviour:
+    - Cache warm + fresh   → return instantly
+    - Cache warm + stale   → return instantly, trigger background refresh
+    - Cache cold           → block once to build it (server startup / first request)
+    - force_refresh=True   → block and rebuild synchronously (admin/refresh endpoint)
+    """
+    global _pipeline_cache
+
+    if force_refresh:
+        logger.info("Forced synchronous pipeline refresh.")
+        return _run_pipeline_sync()
+
+    with _pipeline_lock:
+        cached = _pipeline_cache
+
+    if cached is not None:
+        if _is_stale():
+            logger.info("Cache stale — serving existing data, refreshing in background.")
+            _refresh_in_background()
+        return cached   # ← returns in microseconds
+
+    # Cold start — block once
+    logger.info("Cache cold — running pipeline synchronously (first request).")
+    return _run_pipeline_sync()
 
 
 # ---------------------------------------------------------------------------

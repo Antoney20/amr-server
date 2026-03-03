@@ -1,11 +1,13 @@
+import json
 import logging
 from collections import Counter, defaultdict
 from datetime import datetime, date
 
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.views import View
 
-from app.services.pipeline import get_response_data
+from app.services.analytics import bust_cache, get_detail, get_facilities, get_pathogens, get_trend
+from app.services.pipeline import get_response_data, run_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -82,80 +84,65 @@ class SummaryView(View):
 # ---------------------------------------------------------------------------
 # View 2 — Records table  (paginated)
 # ---------------------------------------------------------------------------
+# class RecordsView(View):
+#     """
+#     GET /api/amr/records/
+
+#     Returns ALL cleaned AMR records in a single response.
+#     No query parameters — filtering and pagination are handled client-side.
+#     """
+
+#     def get(self, request):
+#         _refresh_if_requested(request)
+#         try:
+#             result = run_pipeline()
+#         except Exception:
+#             logger.exception("RecordsView failed")
+#             return _err("Could not load records")
+
+#         records = result.records
+
+#         return JsonResponse({
+#             "status":     "ok",
+#             "fetched_at": result.fetched_at,
+#             "total":      len(records),
+#             "records":    records,
+#         })
+
 
 class RecordsView(View):
     """
     GET /api/amr/records/
-
-    Paginated list of cleaned AMR records.
-
-    Query parameters:
-        page      (int, default 1)      — 1-based page number
-        page_size (int, default 100)    — rows per page, max 1000
-        facility  (str, optional)       — filter by exact facility_name
-        county    (str, optional)       — filter by county
-        organism  (str, optional)       — case-insensitive substring match
-        specimen  (str, optional)       — case-insensitive substring match
-        gender    (str, optional)       — Male | Female | Unknown
-        flagged   (0|1, default 0)      — 1 = only flagged records
-
+    Returns ALL records as streaming JSON — first byte in <100ms.
     """
 
-    PAGE_SIZE_MAX = 1000
-
     def get(self, request):
-        data = _pipeline(request)
-        if data["status"] == "error":
-            return JsonResponse({"status": "error", "errors": data["errors"]}, status=503)
+        if request.GET.get("refresh") == "1":
+            
+            run_pipeline(force_refresh=True)
 
-        records = data["records"]
-
-        # --- Filters ---
-        facility = request.GET.get("facility", "").strip()
-        county   = request.GET.get("county",   "").strip()
-        organism = request.GET.get("organism", "").strip().lower()
-        specimen = request.GET.get("specimen", "").strip().lower()
-        gender   = request.GET.get("gender",   "").strip()
-        flagged  = request.GET.get("flagged",  "0") == "1"
-
-        if facility:
-            records = [r for r in records if r.get("facility_name", "").lower() == facility.lower()]
-        if county:
-            records = [r for r in records if r.get("county", "").lower() == county.lower()]
-        if organism:
-            records = [r for r in records if organism in (r.get("organism") or "").lower()]
-        if specimen:
-            records = [r for r in records if specimen in (r.get("specimen") or "").lower()]
-        if gender:
-            records = [r for r in records if r.get("gender", "") == gender]
-        if flagged:
-            records = [r for r in records if r.get("specimen_date_flag") or r.get("organism_flag")]
-
-        # --- Pagination ---
         try:
-            page = max(1, int(request.GET.get("page", 1)))
-        except ValueError:
-            page = 1
-        try:
-            page_size = min(self.PAGE_SIZE_MAX, max(1, int(request.GET.get("page_size", 100))))
-        except ValueError:
-            page_size = 100
+            result = run_pipeline()
+        except Exception:
+            logger.exception("RecordsView failed")
+            return JsonResponse({"status": "error"}, status=503)
 
-        total   = len(records)
-        pages   = max(1, (total + page_size - 1) // page_size)
-        page    = min(page, pages)
-        start   = (page - 1) * page_size
-        end     = start + page_size
+        def stream():
+            """Yield JSON in chunks — browser gets header immediately."""
+            yield (
+                '{"status":"ok",'
+                f'"fetched_at":"{result.fetched_at}",'
+                f'"total":{result.total},'
+                '"records":['
+            )
+            for i, record in enumerate(result.records):
+                prefix = "" if i == 0 else ","
+                yield prefix + json.dumps(record, separators=(",", ":"))
+            yield "]}"
 
-        return JsonResponse({
-            "status":    "ok",
-            "page":      page,
-            "page_size": page_size,
-            "total":     total,
-            "pages":     pages,
-            "records":   records[start:end],
-        })
-
+        response = StreamingHttpResponse(stream(), content_type="application/json")
+        response["Cache-Control"] = "no-store"
+        return response
 
 # ---------------------------------------------------------------------------
 # View 3 — Resistance dashboard
@@ -278,18 +265,7 @@ class ResistanceView(View):
         ]
 
     def _critical_alerts(self, top_pathogens: list[dict], threshold: float) -> list[dict]:
-        """
-        Filter pathogens whose resistance_rate exceeds threshold.
 
-        Args:
-            top_pathogens: Output of _top_pathogens().
-            threshold:     Resistance % above which an organism is flagged.
-
-        Returns:
-            List of dicts: organism, resistance_rate, severity.
-            severity is "critical" if rate ≥ 60, else "high".
-            Sorted by resistance_rate descending.
-        """
         alerts = []
         for p in top_pathogens:
             if p["resistance_rate"] >= threshold:
@@ -302,18 +278,7 @@ class ResistanceView(View):
         return alerts
 
     def _trend(self, records: list[dict]) -> list[dict]:
-        """
-        Monthly resistance rate time-series over the last 12 months.
 
-        Uses specimen_date to bucket records by YYYY-MM.  Months with no data
-        are omitted.
-
-        Args:
-            records: Cleaned pipeline records.
-
-        Returns:
-            List of dicts sorted ascending: month (YYYY-MM), resistance_rate, isolates.
-        """
         buckets: dict[str, list[dict]] = defaultdict(list)
         for r in records:
             d = _parse_date(r.get("specimen_date", ""))
@@ -341,3 +306,84 @@ class ResistanceView(View):
                 "isolates":        isolates,
             })
         return trend
+    
+    
+    
+
+def _refresh_if_requested(request) -> None:
+    if request.GET.get("refresh") == "1":
+        run_pipeline(force_refresh=True)
+        bust_cache()
+
+
+def _err(msg: str, code: int = 503) -> JsonResponse:
+    return JsonResponse({"status": "error", "detail": msg}, status=code)
+
+
+
+class FacilitiesView(View):
+
+    def get(self, request):
+        _refresh_if_requested(request)
+        try:
+            data = get_facilities()
+        except Exception:
+            logger.exception("FacilitiesView failed")
+            return _err("Could not compute facilities")
+        result = run_pipeline()
+        return JsonResponse({
+            "status":     "ok",
+            "fetched_at": result.fetched_at,
+            "count":      len(data),
+            "facilities": data,
+        })
+
+
+class PathogensView(View):
+
+    def get(self, request):
+        _refresh_if_requested(request)
+        try:
+            data = get_pathogens()
+        except Exception:
+            logger.exception("PathogensView failed")
+            return _err("Could not compute pathogens")
+        result = run_pipeline()
+        return JsonResponse({
+            "status":     "ok",
+            "fetched_at": result.fetched_at,
+            "count":      len(data),
+            "pathogens":  data,
+        })
+
+
+
+class TrendView(View):
+
+    def get(self, request):
+        _refresh_if_requested(request)
+        try:
+            data = get_trend()
+        except Exception:
+            logger.exception("TrendView failed")
+            return _err("Could not compute trend")
+        result = run_pipeline()
+        return JsonResponse({
+            "status":     "ok",
+            "fetched_at": result.fetched_at,
+            "count":      len(data),
+            "trend":      data,
+        })
+
+
+
+class DetailView(View):
+
+    def get(self, request):
+        _refresh_if_requested(request)
+        try:
+            data = get_detail()
+        except Exception:
+            logger.exception("DetailView failed")
+            return _err("Could not build detail payload")
+        return JsonResponse(data)

@@ -12,6 +12,12 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 import os
 from pathlib import Path
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -42,7 +48,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",  
     "https://localhost:3000",
     'https://test-amr-app.vercel.app',
-    'http://test-amr-app.vercel.app/'
+    'http://test-amr-app.vercel.app'
     
 
 
@@ -66,7 +72,7 @@ CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000', 
     'https://localhost:3000', 
     'https://test-amr-app.vercel.app',
-    'http://test-amr-app.vercel.app/'
+    'http://test-amr-app.vercel.app'
     
     
 ]
@@ -148,17 +154,49 @@ DATABASES = {
 # ------------------------
 # DATA WAREHOUSE (MSSQL) NPHI
 # ------------------------
-DATABASES["warehouse"] = {
-    "ENGINE": "mssql",
-    "NAME": os.getenv("MSSQL_DB"),
-    "USER": os.getenv("MSSQL_USER"),
-    "PASSWORD": os.getenv("MSSQL_PASSWORD"),
-    "HOST": os.getenv("MSSQL_HOST"),
-    "OPTIONS": {
-        "driver": "ODBC Driver 18 for SQL Server",
-        "trust_server_certificate": True,
-    },
+# DATABASES["warehouse"] = {
+#     "ENGINE": "mssql",
+#     "NAME": os.getenv("MSSQL_DB"),
+#     "USER": os.getenv("MSSQL_USER"),
+#     "PASSWORD": os.getenv("MSSQL_PASSWORD"),
+#     "HOST": os.getenv("MSSQL_HOST"),
+#     "OPTIONS": {
+#         "driver": "ODBC Driver 18 for SQL Server",
+#         "trust_server_certificate": True,
+#     },
+# }
+
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+    }
 }
+
+# ── Warehouse (MSSQL) - Optional Fallback ────────────────────────────────
+MSSQL_DB = os.getenv("MSSQL_DB")
+MSSQL_USER = os.getenv("MSSQL_USER")
+MSSQL_PASSWORD = os.getenv("MSSQL_PASSWORD")
+MSSQL_HOST = os.getenv("MSSQL_HOST")
+
+if all([MSSQL_DB, MSSQL_USER, MSSQL_PASSWORD, MSSQL_HOST]):
+    DATABASES["warehouse"] = {
+        "ENGINE": "mssql",
+        "NAME": MSSQL_DB,
+        "USER": MSSQL_USER,
+        "PASSWORD": MSSQL_PASSWORD,
+        "HOST": MSSQL_HOST,
+        "PORT": os.getenv("MSSQL_PORT", "1433"),
+        "OPTIONS": {
+            "driver": "ODBC Driver 18 for SQL Server",
+            "trust_server_certificate": True,
+        },
+    }
+else:
+    # Fallback to SQLite if MSSQL env vars not set
+    DATABASES["warehouse"] = DATABASES["default"]
+
 MIGRATION_MODULES = {
     "warehouse": None,
 }

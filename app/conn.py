@@ -139,23 +139,72 @@ def _table() -> str:
 # Cursor
 # ---------------------------------------------------
 
+# @contextmanager
+# def get_warehouse_cursor():
+#     cur = None
+#     try:
+#         cur = connections["warehouse"].cursor()
+#         cur.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
+#         yield cur
+#     except (OperationalError, DatabaseError):
+#         logger.exception("Warehouse cursor error")
+#         raise
+#     finally:
+#         if cur is not None:
+#             try:
+#                 cur.close()
+#             except Exception:
+#                 pass
+
+
+
+# ---------------------------------------------------
+# Cursor (2s timeout)
+# ---------------------------------------------------
+
 @contextmanager
-def get_warehouse_cursor():
+def get_warehouse_cursor(timeout_seconds: int = 2):
     cur = None
     try:
-        cur = connections["warehouse"].cursor()
+        conn = connections["warehouse"]
+
+        # ensure connection opened
+        conn.ensure_connection()
+
+        # ---- FORCE DB timeout (seconds → milliseconds) ----
+        # works for SQL Server / pyodbc
+        raw_conn = conn.connection
+        try:
+            raw_conn.timeout = timeout_seconds
+        except Exception:
+            pass
+
+        cur = conn.cursor()
+
+        # isolation level
         cur.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
+
+        # SQL Server query timeout (milliseconds)
+        try:
+            cur.execute(f"SET LOCK_TIMEOUT {timeout_seconds * 1000}")
+        except Exception:
+            pass
+
         yield cur
-    except (OperationalError, DatabaseError):
-        logger.exception("Warehouse cursor error")
+
+    except (OperationalError, DatabaseError) as e:
+        logger.error(
+            "Warehouse timeout after %ss — fallback activated",
+            timeout_seconds,
+        )
         raise
+
     finally:
         if cur is not None:
             try:
                 cur.close()
             except Exception:
                 pass
-
 
 # ---------------------------------------------------
 # Excel fallback

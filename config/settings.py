@@ -32,7 +32,7 @@ SECRET_KEY = 'django-insecure-^k-(ymlchurg)6uysqe@pp7#oyi)%^k*6tuvbrj$&5)zh_wu*p
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['amr.cema.africa', '127.0.0.1']
+ALLOWED_HOSTS = ['amr.cema.africa', '127.0.0.1','194.163.143.16']
 
 # Django security settings
 SECURE_BROWSER_XSS_FILTER = True
@@ -48,7 +48,8 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",  
     "https://localhost:3000",
     'https://test-amr-app.vercel.app',
-    'http://test-amr-app.vercel.app'
+    'http://test-amr-app.vercel.app',
+    
     
 
 
@@ -143,12 +144,12 @@ CACHES = {
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
-}
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',
+#     }
+# }
 
 
 # ------------------------
@@ -191,7 +192,12 @@ if all([MSSQL_DB, MSSQL_USER, MSSQL_PASSWORD, MSSQL_HOST]):
         "OPTIONS": {
             "driver": "ODBC Driver 18 for SQL Server",
             "trust_server_certificate": True,
+            "extra_params": (
+                "Connection Timeout=2;"
+                "Login Timeout=2;"
+            ),
         },
+
     }
 else:
     # Fallback to SQLite if MSSQL env vars not set

@@ -53,6 +53,18 @@ FACILITY_MAP: dict[str, str] = {
     "10903": "Nyeri County Referral Hospital",
     "19847": "The Nairobi Hospital",
     "11094": "Thika Level 5 Hospital",
+    "13080": "MBAGATHI DISTRICT HOSPITAL",
+    "11555": "MALINDI DISTRICT HOSPITAL",
+    "15077": "Longisa County Referral  Hospital",
+    "19543": "THE MATER HOSPITAL (WESTLANDS)",
+    "24979": "KENYATTA UNIVERSITY TEACHING REFFERAL AND RESEARCH HOSPITAL",
+    "13098": "MP SHAH HOSPITAL (WESTLANDS)",
+    "25582" : "THE NAIROBI HOSPITAL (CAPITAL CENTRE)",
+    "99999": "LIMS TEST FACILITY",
+    "13240": "Umoja Health Centre",
+    "12345": "Kiseuni Dispensary",
+    "25412": "Ammusait General Hospital",
+    "13359": "HAGADERA HOSPITAL",
 }
 
 # ---------------------------------------------------------------------------
@@ -254,6 +266,80 @@ SPECIMEN_CODE_MAP: dict[str, str] = {
 SPECIMEN_DATE_MIN = date(2019, 1, 1)
 
 
+
+# Lowercase raw value → canonical organism name
+ORGANISM_TEXT_MAP: dict[str, str] = {
+    # No growth / negative results
+    "x": "No growth", "xx": "No growth", "xxx": "No growth",
+    "xxxx": "No growth", "xxxxx": "No growth", "ng": "No growth",
+    "no growth": "No growth", "nil growth": "No growth",
+    # No significant growth
+    "xsg": "No significant growth found",
+    "no significant growth": "No significant growth found",
+    "no significant growth found": "No significant growth found",
+    # No organism isolated
+    "no organism isolated": "No organism isolated",
+    "noi": "No organism isolated",
+    # Contaminated
+    "con": "Contaminated specimen", "contaminated": "Contaminated specimen",
+    "contaminated specimen": "Contaminated specimen",
+    # Unknown / Other
+    "unk": "Unknown", "unknown": "Unknown",
+    "oth": "Other", "other": "Other",
+    # Shortcodes
+    "kl": "Klebsiella",
+    # Candida species
+    "c.tropicalis": "Candida tropicalis",
+    "c.glabrata": "Candida glabrata",
+    "c.ciferrii": "Candida ciferrii",
+    "c.lusitaniae": "Candida lusitaniae",
+    "c.albicans": "Candida albicans",
+    "c.krusei": "Candida krusei",
+    "c.parapsilosis": "Candida parapsilosis",
+    # Staphylococcus
+    "staph.aureus": "Staphylococcus aureus",
+    "s.aureus": "Staphylococcus aureus",
+    "staph aureus": "Staphylococcus aureus",
+    "staphylococcus aureus": "Staphylococcus aureus",
+    "mrsa": "Staphylococcus aureus (MRSA)",
+    "mssa": "Staphylococcus aureus (MSSA)",
+    "coagulase negative staph": "Coagulase negative Staphylococcus",
+    "cons": "Coagulase negative Staphylococcus",
+    "coagulase neg staph": "Coagulase negative Staphylococcus",
+    # Streptococcus
+    "strep pneumoniae": "Streptococcus pneumoniae",
+    "s.pneumoniae": "Streptococcus pneumoniae",
+    "streptococcus pneumoniae": "Streptococcus pneumoniae",
+    "strep pyogenes": "Streptococcus pyogenes",
+    # E. coli
+    "e.coli": "Escherichia coli",
+    "e. coli": "Escherichia coli",
+    "escherichia coli": "Escherichia coli",
+    "ec": "Escherichia coli",
+    # Klebsiella
+    "klebsiella": "Klebsiella pneumoniae",
+    "klebsiella pneumoniae": "Klebsiella pneumoniae",
+    "k.pneumoniae": "Klebsiella pneumoniae",
+    # Pseudomonas
+    "pseudomonas": "Pseudomonas aeruginosa",
+    "pseudomonas aeruginosa": "Pseudomonas aeruginosa",
+    "p.aeruginosa": "Pseudomonas aeruginosa",
+    # Acinetobacter
+    "acinetobacter": "Acinetobacter baumannii",
+    "acinetobacter baumannii": "Acinetobacter baumannii",
+    # Enterococcus
+    "enterococcus": "Enterococcus faecalis",
+    "enterococcus faecalis": "Enterococcus faecalis",
+    "enterococcus faecium": "Enterococcus faecium",
+    # Salmonella
+    "salmonella": "Salmonella species",
+    "salmonella typhi": "Salmonella typhi",
+    # Proteus
+    "proteus": "Proteus mirabilis",
+    "proteus mirabilis": "Proteus mirabilis",
+}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -362,11 +448,6 @@ def clean_gender(row: dict) -> dict:
         gender = "Unknown"
     row["gender"] = gender
     return row
-
-
-# ---------------------------------------------------------------------------
-# Specimen Date
-# ---------------------------------------------------------------------------
 
 def build_specimen_date(row: dict) -> dict:
     """
@@ -520,39 +601,54 @@ def resolve_specimen(row: dict) -> dict:
 # Organism / Pathogen
 # ---------------------------------------------------------------------------
 
+# def resolve_organism(row: dict) -> dict:
+#     """
+#     Derive ``organism`` from ORGANISM_ISOLATED_CDW (preferred) or ORGANISM_ISOLATED.
+
+#     Rules:
+#         - ORGANISM_ISOLATED_CDW is used first — it contains cleaned values.
+#         - ORGANISM_ISOLATED is used only as fallback but is **not** cleaned —
+#           it is taken as-is to avoid masking dirty data.
+#         - Blank in both → ``organism`` is ``""``; ``organism_flag`` is True.
+
+#     Args:
+#         row (dict): Raw warehouse row.
+
+#     Returns:
+#         dict: Row with ``organism`` and ``organism_flag`` keys set.
+#     """
+#     cdw = row.get("ORGANISM_ISOLATED_CDW")
+#     raw = row.get("ORGANISM_ISOLATED")
+
+#     if not _is_blank(cdw):
+#         row["organism"] = str(cdw).strip()
+#         row["organism_flag"] = False
+#         return row
+
+#     if not _is_blank(raw):
+#         row["organism"] = str(raw).strip()
+#         row["organism_flag"] = False
+#         return row
+
+#     row["organism"] = ""
+#     row["organism_flag"] = True
+#     return row
+
+
 def resolve_organism(row: dict) -> dict:
-    """
-    Derive ``organism`` from ORGANISM_ISOLATED_CDW (preferred) or ORGANISM_ISOLATED.
-
-    Rules:
-        - ORGANISM_ISOLATED_CDW is used first — it contains cleaned values.
-        - ORGANISM_ISOLATED is used only as fallback but is **not** cleaned —
-          it is taken as-is to avoid masking dirty data.
-        - Blank in both → ``organism`` is ``""``; ``organism_flag`` is True.
-
-    Args:
-        row (dict): Raw warehouse row.
-
-    Returns:
-        dict: Row with ``organism`` and ``organism_flag`` keys set.
-    """
     cdw = row.get("ORGANISM_ISOLATED_CDW")
     raw = row.get("ORGANISM_ISOLATED")
 
-    if not _is_blank(cdw):
-        row["organism"] = str(cdw).strip()
-        row["organism_flag"] = False
-        return row
-
-    if not _is_blank(raw):
-        row["organism"] = str(raw).strip()
-        row["organism_flag"] = False
-        return row
+    for value in (cdw, raw):
+        if not _is_blank(value):
+            norm = str(value).strip().lower()
+            row["organism"] = ORGANISM_TEXT_MAP.get(norm, str(value).strip().title())
+            row["organism_flag"] = False
+            return row
 
     row["organism"] = ""
     row["organism_flag"] = True
     return row
-
 
 # ---------------------------------------------------------------------------
 # Main entry point

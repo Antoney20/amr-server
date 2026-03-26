@@ -28,9 +28,7 @@ _pipeline_cache: Optional["PipelineResult"] = None
 _pipeline_lock  = threading.Lock()
 _refresh_thread: Optional[threading.Thread] = None
 _CACHE_TTL_SECONDS = 60 * 60 * 5 
-# ---------------------------------------------------------------------------
-# TTL in-process cache (avoids hammering the warehouse on every request)
-# ---------------------------------------------------------------------------
+
 _CACHE_TTL_SECONDS = 300   
 _cache: dict[str, Any] = {}
 

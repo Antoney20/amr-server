@@ -55,16 +55,16 @@ FACILITY_MAP: dict[str, str] = {
     "11094": "Thika Level 5 Hospital",
     "13080": "MBAGATHI DISTRICT HOSPITAL",
     "11555": "MALINDI DISTRICT HOSPITAL",
+    "24979": "KENYATTA UNIVERSITY TEACHING REFFERAL AND RESEARCH HOSPITAL",
     "15077": "Longisa County Referral  Hospital",
     "19543": "THE MATER HOSPITAL (WESTLANDS)",
-    "24979": "KENYATTA UNIVERSITY TEACHING REFFERAL AND RESEARCH HOSPITAL",
     "13098": "MP SHAH HOSPITAL (WESTLANDS)",
     "25582" : "THE NAIROBI HOSPITAL (CAPITAL CENTRE)",
     "99999": "LIMS TEST FACILITY",
     "13240": "Umoja Health Centre",
     "12345": "Kiseuni Dispensary",
     "25412": "Ammusait General Hospital",
-    "13359": "HAGADERA HOSPITAL",
+    "13359": "HAGADERA HOSPITAL", 
 }
 
 # ---------------------------------------------------------------------------

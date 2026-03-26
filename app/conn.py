@@ -1,21 +1,19 @@
 # """
-# conn.py — Warehouse DB cursor, reusing DATABASES["warehouse"] from settings.py.
-
-# The DB router (WarehouseRouter) guards ORM model calls.  Raw cursors bypass it
-# by design — we replicate the write-block here with a regex guard, and set
-# READ UNCOMMITTED so warehouse reads never acquire shared locks.
-
-# Table name is resolved lazily (call-time) from settings.WAREHOUSE_AMR_TABLE so
-# this module is safe to import before django.setup() runs.
+# conn.py — Warehouse DB cursor with Excel fallback.
+# Never raises outside fetch_warehouse_data(); always falls back gracefully.
 # """
 
 # import logging
 # import re
 # from contextlib import contextmanager
+# from pathlib import Path
 
+# import pandas as pd
 # from django.db import connections, DatabaseError, OperationalError
 
 # logger = logging.getLogger(__name__)
+
+# BACKUP_FILE = Path(__file__).resolve().parent / "data" / "backup.xlsx"
 
 # WAREHOUSE_COLUMNS = (
 #     "GENDER", "SPECIMEN_SOURCE", "FACILITY_NAME", "COLLECTION_DATE",
@@ -29,68 +27,149 @@
 
 
 # def _table() -> str:
-#     """Lazy settings read — safe to call before django.setup()."""
 #     from django.conf import settings
 #     return getattr(settings, "WAREHOUSE_AMR_TABLE", "dbo.AMR_DATA")
 
 
-# @contextmanager
-# def get_warehouse_cursor():
-#     """
-#     Yield a READ UNCOMMITTED cursor on DATABASES["warehouse"].
+# # -----------------------------------------------------------------------
+# # Cursor — lazy, never calls ensure_connection() at import / startup time
+# # -----------------------------------------------------------------------
 
-#     Raises PermissionError on any write SQL before execution.
-#     Cursor is always closed on exit.
+# @contextmanager
+# def get_warehouse_cursor(timeout_seconds: int = 2):
+#     """
+#     Yields a live pyodbc cursor pointed at the warehouse.
+#     Raises OperationalError / DatabaseError on failure — caller decides
+#     what to do (fetch_warehouse_data falls back to Excel).
+
+#     KEY CHANGE: we do NOT call conn.ensure_connection() explicitly.
+#     Django does that lazily when we call conn.cursor(), so management
+#     commands (createsuperuser, migrate, etc.) never touch the warehouse
+#     unless this function is actually called from request-handling code.
 #     """
 #     cur = None
 #     try:
-#         cur = connections["warehouse"].cursor()
+#         conn = connections["warehouse"]
+
+#         # --- set login/query timeout BEFORE opening the connection ---
+#         # django-mssql / pyodbc respects these on the raw Options dict
+#         # before the socket is opened, so the 2-second cap is enforced
+#         # at the TCP handshake level, not just at the query level.
+#         db_settings = conn.settings_dict
+#         db_settings.setdefault("OPTIONS", {})
+#         db_settings["OPTIONS"]["timeout"] = timeout_seconds  # pyodbc login timeout
+
+#         # cursor() opens the connection lazily if not already open
+#         cur = conn.cursor()
+
+#         # per-session query timeout (ms) — belt-and-suspenders
+#         try:
+#             cur.execute(f"SET LOCK_TIMEOUT {timeout_seconds * 1000}")
+#         except Exception:
+#             pass
+
 #         cur.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
+
 #         yield cur
+
 #     except (OperationalError, DatabaseError):
-#         logger.exception("Warehouse cursor error")
-#         raise
+#         logger.warning(
+#             "Warehouse unreachable (timeout=%ss) — caller should fall back",
+#             timeout_seconds,
+#         )
+#         raise  # let fetch_warehouse_data() handle it
+
 #     finally:
 #         if cur is not None:
 #             try:
 #                 cur.close()
 #             except Exception:
 #                 pass
+#         # Close the underlying connection so a failed/timed-out socket
+#         # is never reused by the next request in the same worker process.
+#         try:
+#             connections["warehouse"].close()
+#         except Exception:
+#             pass
 
 
-# def fetch_warehouse_data(columns: tuple = WAREHOUSE_COLUMNS, batch_size: int = 10_000) -> list[dict]:
-#     """
-#     Stream all AMR rows from the warehouse in batches.
+# # -----------------------------------------------------------------------
+# # Excel fallback
+# # -----------------------------------------------------------------------
 
-#     Args:
-#         columns:    Columns to SELECT. Defaults to WAREHOUSE_COLUMNS.
-#         batch_size: Rows per fetchmany call. Tune for memory vs throughput.
+# def fetch_backup_excel(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
+#     try:
+#         if not BACKUP_FILE.exists():
+#             logger.error("Backup file not found: %s", BACKUP_FILE)
+#             return []
 
-#     Returns:
-#         List of dicts keyed by column name, or [] on error.
-#     """
-#     sql = "SELECT {} FROM {}".format(", ".join(f"[{c}]" for c in columns), _table())
+#         # read header first to validate columns
+#         df_preview = pd.read_excel(BACKUP_FILE, nrows=0, engine="openpyxl")
+#         excel_cols = list(df_preview.columns)
 
-#     if _WRITE_RE.search(sql):
-#         logger.critical("Write SQL blocked on warehouse cursor: %s", sql[:120])
+#         valid_cols = [c for c in columns if c in excel_cols]
+#         missing_cols = [c for c in columns if c not in excel_cols]
+
+#         if missing_cols:
+#             logger.warning("Missing columns in backup.xlsx: %s", missing_cols)
+
+#         df = pd.read_excel(BACKUP_FILE, usecols=valid_cols, engine="openpyxl")
+
+#         for col in missing_cols:
+#             df[col] = None
+
+#         df = df[list(columns)]
+
+#         logger.warning("Using Excel backup (%d rows loaded)", len(df))
+#         return df.to_dict(orient="records")
+
+#     except Exception:
+#         logger.exception("Failed loading Excel backup")
 #         return []
 
-#     rows: list[dict] = []
+
+# # -----------------------------------------------------------------------
+# # Main entry point
+# # -----------------------------------------------------------------------
+
+# def fetch_warehouse_data(
+#     columns: tuple = WAREHOUSE_COLUMNS,
+#     batch_size: int = 10_000,
+# ) -> list[dict]:
+#     """
+#     Returns rows from the warehouse, or from Excel if the warehouse is
+#     unreachable.  Never raises — always returns a (possibly empty) list.
+#     """
+#     sql = "SELECT {} FROM {}".format(
+#         ", ".join(f"[{c}]" for c in columns),
+#         _table(),
+#     )
+
+#     if _WRITE_RE.search(sql):
+#         logger.critical("Write SQL blocked: %s", sql[:120])
+#         return []
+
 #     try:
+#         rows: list[dict] = []
 #         with get_warehouse_cursor() as cur:
 #             cur.execute(sql)
 #             col_names = [d[0] for d in cur.description]
 #             while batch := cur.fetchmany(batch_size):
 #                 rows.extend(dict(zip(col_names, row)) for row in batch)
-#         logger.info("Warehouse fetch: %d rows", len(rows))
+
+#         logger.info("Warehouse fetch OK: %d rows", len(rows))
+#         return rows
+
 #     except Exception:
-#         logger.exception("fetch_warehouse_data failed")
-#         return []
-#     return rows
+#         logger.warning("Warehouse fetch failed — switching to Excel backup")
+#         return fetch_backup_excel(columns)
+
+
 
 
 """
 conn.py — Warehouse DB cursor with Excel fallback.
+Never raises outside fetch_warehouse_data(); always falls back gracefully.
 """
 
 import logging
@@ -103,17 +182,7 @@ from django.db import connections, DatabaseError, OperationalError
 
 logger = logging.getLogger(__name__)
 
-
-# ✅ Direct fallback f")ile path
-# BACKUP_FILE = Path("./data/backup.xlsx")
-# example alternatives:
-# Path("./data/backup.xlsx")
-# Path(__file__).resolve().parent / "backup.xlsx"
-
-BACKUP_FILE = (
-    Path(__file__).resolve().parent / "data" / "backup.xlsx"
-)
-
+BACKUP_FILE = Path(__file__).resolve().parent / "data" / "backup.xlsx"
 
 WAREHOUSE_COLUMNS = (
     "GENDER", "SPECIMEN_SOURCE", "FACILITY_NAME", "COLLECTION_DATE",
@@ -121,83 +190,118 @@ WAREHOUSE_COLUMNS = (
     "ORGANISM_ISOLATED_CDW", "SPECIMEN_SOURCE_CDW", "AGE",
 )
 
+# Facilities to remove (by use code)
+FACILITIES_TO_REMOVE = {
+    "15077",   # Longisa County Referral Hospital
+    "19543",   # THE MATER HOSPITAL (WESTLANDS)
+    "13098",   # MP SHAH HOSPITAL (WESTLANDS)
+    "25582",   # THE NAIROBI HOSPITAL (CAPITAL CENTRE)
+    "99999",   # LIMS TEST FACILITY
+    "13240",   # Umoja Health Centre
+    "12345",   # Kiseuni Dispensary
+    "25412",   # Ammusait General Hospital
+    "13359",   # HAGADERA HOSPITAL
+}
+
 _WRITE_RE = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|MERGE)\b", re.I
 )
 
-
-# ---------------------------------------------------
-# Lazy table resolution
-# ---------------------------------------------------
 
 def _table() -> str:
     from django.conf import settings
     return getattr(settings, "WAREHOUSE_AMR_TABLE", "dbo.AMR_DATA")
 
 
-# ---------------------------------------------------
-# Cursor
-# ---------------------------------------------------
+def _is_facility_excluded(use_code) -> bool:
+    """
+    Check if a facility should be filtered out by use code.
+    
 
-# @contextmanager
-# def get_warehouse_cursor():
-#     cur = None
-#     try:
-#         cur = connections["warehouse"].cursor()
-#         cur.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
-#         yield cur
-#     except (OperationalError, DatabaseError):
-#         logger.exception("Warehouse cursor error")
-#         raise
-#     finally:
-#         if cur is not None:
-#             try:
-#                 cur.close()
-#             except Exception:
-#                 pass
+    
+    Returns:
+        True if facility should be excluded, False otherwise.
+    """
+    if not use_code:
+        return False
+    
+    code = str(use_code).strip()
+    return code in FACILITIES_TO_REMOVE
 
 
+def _filter_excluded_facilities(rows: list[dict]) -> list[dict]:
+    """
+    Filter out rows from excluded facilities by USE_CODE.
+    
+    Args:
+        rows: List of warehouse/Excel rows.
+    
+    Returns:
+        Filtered list excluding rows with use codes in FACILITIES_TO_REMOVE.
+    """
+    initial_count = len(rows)
+    filtered = [
+        row for row in rows
+        if not _is_facility_excluded(row.get("FACILITY_NAME"))
+    ]
+    removed_count = initial_count - len(filtered)
+    
+    if removed_count > 0:
+        logger.info(
+            "_filter_excluded_facilities: Removed %d rows from excluded facilities.",
+            removed_count
+        )
+    
+    return filtered
 
-# ---------------------------------------------------
-# Cursor (2s timeout)
-# ---------------------------------------------------
+
+# -----------------------------------------------------------------------
+# Cursor — lazy, never calls ensure_connection() at import / startup time
+# -----------------------------------------------------------------------
 
 @contextmanager
 def get_warehouse_cursor(timeout_seconds: int = 2):
+    """
+    Yields a live pyodbc cursor pointed at the warehouse.
+    Raises OperationalError / DatabaseError on failure — caller decides
+    what to do (fetch_warehouse_data falls back to Excel).
+
+    KEY CHANGE: we do NOT call conn.ensure_connection() explicitly.
+    Django does that lazily when we call conn.cursor(), so management
+    commands (createsuperuser, migrate, etc.) never touch the warehouse
+    unless this function is actually called from request-handling code.
+    """
     cur = None
     try:
         conn = connections["warehouse"]
 
-        # ensure connection opened
-        conn.ensure_connection()
+        # --- set login/query timeout BEFORE opening the connection ---
+        # django-mssql / pyodbc respects these on the raw Options dict
+        # before the socket is opened, so the 2-second cap is enforced
+        # at the TCP handshake level, not just at the query level.
+        db_settings = conn.settings_dict
+        db_settings.setdefault("OPTIONS", {})
+        db_settings["OPTIONS"]["timeout"] = timeout_seconds  # pyodbc login timeout
 
-        # ---- FORCE DB timeout (seconds → milliseconds) ----
-        # works for SQL Server / pyodbc
-        raw_conn = conn.connection
-        try:
-            raw_conn.timeout = timeout_seconds
-        except Exception:
-            pass
-
+        # cursor() opens the connection lazily if not already open
         cur = conn.cursor()
 
-        # isolation level
-        cur.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
-
-        # SQL Server query timeout (milliseconds)
+        # per-session query timeout (ms) — belt-and-suspenders
         try:
             cur.execute(f"SET LOCK_TIMEOUT {timeout_seconds * 1000}")
         except Exception:
             pass
 
+        cur.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
+
         yield cur
 
-    except (OperationalError, DatabaseError) as e:
-        logger.error(
-            "Warehouse timeout after %ss — fallback activated",
+    except (OperationalError, DatabaseError):
+        logger.warning(
+            "Warehouse unreachable (timeout=%ss) — caller should fall back",
             timeout_seconds,
         )
-        raise
+        raise  # let fetch_warehouse_data() handle it
 
     finally:
         if cur is not None:
@@ -205,93 +309,69 @@ def get_warehouse_cursor(timeout_seconds: int = 2):
                 cur.close()
             except Exception:
                 pass
+        # Close the underlying connection so a failed/timed-out socket
+        # is never reused by the next request in the same worker process.
+        try:
+            connections["warehouse"].close()
+        except Exception:
+            pass
 
-# ---------------------------------------------------
+
+# -----------------------------------------------------------------------
 # Excel fallback
-# ---------------------------------------------------
+# -----------------------------------------------------------------------
 
-# def fetch_backup_excel(columns=WAREHOUSE_COLUMNS) -> list[dict]:
-#     try:
-#         if not BACKUP_FILE.exists():
-#             logger.error("Backup file not found: %s", BACKUP_FILE)
-#             return []
-
-#         # df = pd.read_excel(BACKUP_FILE, usecols=list(columns))
-#         df = pd.read_excel(  BACKUP_FILE, usecols=list(columns), engine="openpyxl",)
-
-#         logger.warning(
-#             "Warehouse unavailable — using Excel backup (%d rows)",
-#             len(df),
-#         )
-
-#         return df.to_dict(orient="records")
-
-#     except Exception:
-#         logger.exception("Failed loading Excel backup")
-#         return []
-
-
-def fetch_backup_excel(columns=WAREHOUSE_COLUMNS) -> list[dict]:
+def fetch_backup_excel(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
     try:
         if not BACKUP_FILE.exists():
             logger.error("Backup file not found: %s", BACKUP_FILE)
             return []
 
-        # ---- read header first ----
-        df_preview = pd.read_excel(
-            BACKUP_FILE,
-            nrows=0,
-            engine="openpyxl",
-        )
-
+        # read header first to validate columns
+        df_preview = pd.read_excel(BACKUP_FILE, nrows=0, engine="openpyxl")
         excel_cols = list(df_preview.columns)
-        logger.info("Excel columns found: %s", excel_cols)
 
-        # ---- keep only existing columns ----
         valid_cols = [c for c in columns if c in excel_cols]
         missing_cols = [c for c in columns if c not in excel_cols]
 
         if missing_cols:
-            logger.warning(
-                "Missing columns in backup.xlsx: %s",
-                missing_cols,
-            )
+            logger.warning("Missing columns in backup.xlsx: %s", missing_cols)
 
-        # ---- load only valid columns ----
-        df = pd.read_excel(
-            BACKUP_FILE,
-            usecols=valid_cols,
-            engine="openpyxl",
-        )
+        df = pd.read_excel(BACKUP_FILE, usecols=valid_cols, engine="openpyxl")
 
-        # ---- add missing columns as None ----
         for col in missing_cols:
             df[col] = None
 
-        # ---- enforce column order ----
         df = df[list(columns)]
 
-        logger.warning(
-            "Using Excel backup (%d rows loaded)",
-            len(df),
-        )
-
-        return df.to_dict(orient="records")
+        logger.warning("Using Excel backup (%d rows loaded)", len(df))
+        
+        # Filter excluded facilities before returning
+        rows = df.to_dict(orient="records")
+        rows = _filter_excluded_facilities(rows)
+        
+        return rows
 
     except Exception:
         logger.exception("Failed loading Excel backup")
         return []
 
 
-# ---------------------------------------------------
-# Main fetch
-# ---------------------------------------------------
+# -----------------------------------------------------------------------
+# Main entry point
+# -----------------------------------------------------------------------
 
 def fetch_warehouse_data(
     columns: tuple = WAREHOUSE_COLUMNS,
     batch_size: int = 10_000,
 ) -> list[dict]:
-
+    """
+    Returns rows from the warehouse, or from Excel if the warehouse is
+    unreachable.  Never raises — always returns a (possibly empty) list.
+    
+    Filters out rows from excluded facilities (by FACILITY_NAME) before
+    returning, regardless of source (warehouse or Excel backup).
+    """
     sql = "SELECT {} FROM {}".format(
         ", ".join(f"[{c}]" for c in columns),
         _table(),
@@ -301,20 +381,21 @@ def fetch_warehouse_data(
         logger.critical("Write SQL blocked: %s", sql[:120])
         return []
 
-    rows: list[dict] = []
-
     try:
+        rows: list[dict] = []
         with get_warehouse_cursor() as cur:
             cur.execute(sql)
-
             col_names = [d[0] for d in cur.description]
-
             while batch := cur.fetchmany(batch_size):
                 rows.extend(dict(zip(col_names, row)) for row in batch)
 
-        logger.info("Warehouse fetch successful: %d rows", len(rows))
+        logger.info("Warehouse fetch OK: %d rows", len(rows))
+        
+        # Filter excluded facilities before returning
+        rows = _filter_excluded_facilities(rows)
+        
         return rows
 
     except Exception:
-        logger.exception("Warehouse fetch failed — switching to backup")
+        logger.warning("Warehouse fetch failed — switching to Excel backup")
         return fetch_backup_excel(columns)

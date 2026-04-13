@@ -1,3 +1,5 @@
+
+
 # """
 # conn.py — Warehouse DB cursor with Excel fallback.
 # Never raises outside fetch_warehouse_data(); always falls back gracefully.
@@ -21,6 +23,21 @@
 #     "ORGANISM_ISOLATED_CDW", "SPECIMEN_SOURCE_CDW", "AGE",
 # )
 
+# # Facilities to remove (by use code)
+# FACILITIES_TO_REMOVE = {
+#     "15077",   # Longisa County Referral Hospital
+#     "19543",   # THE MATER HOSPITAL (WESTLANDS)
+#     "2",
+#     "13098",   # MP SHAH HOSPITAL (WESTLANDS)
+#     "25582",   # THE NAIROBI HOSPITAL (CAPITAL CENTRE)
+#     "99999",   # LIMS TEST FACILITY
+#     "13240",   # Umoja Health Centre
+#     "12345",   # Kiseuni Dispensary
+#     "25412",   # Ammusait General Hospital
+#     "13359",   # HAGADERA HOSPITAL
+#     "2",
+# }
+
 # _WRITE_RE = re.compile(
 #     r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|MERGE)\b", re.I
 # )
@@ -29,6 +46,48 @@
 # def _table() -> str:
 #     from django.conf import settings
 #     return getattr(settings, "WAREHOUSE_AMR_TABLE", "dbo.AMR_DATA")
+
+
+# def _is_facility_excluded(use_code) -> bool:
+#     """
+#     Check if a facility should be filtered out by use code.
+    
+
+    
+#     Returns:
+#         True if facility should be excluded, False otherwise.
+#     """
+#     if not use_code:
+#         return False
+    
+#     code = str(use_code).strip()
+#     return code in FACILITIES_TO_REMOVE
+
+
+# def _filter_excluded_facilities(rows: list[dict]) -> list[dict]:
+#     """
+#     Filter out rows from excluded facilities by USE_CODE.
+    
+#     Args:
+#         rows: List of warehouse/Excel rows.
+    
+#     Returns:
+#         Filtered list excluding rows with use codes in FACILITIES_TO_REMOVE.
+#     """
+#     initial_count = len(rows)
+#     filtered = [
+#         row for row in rows
+#         if not _is_facility_excluded(row.get("FACILITY_NAME"))
+#     ]
+#     removed_count = initial_count - len(filtered)
+    
+#     if removed_count > 0:
+#         logger.info(
+#             "_filter_excluded_facilities: Removed %d rows from excluded facilities.",
+#             removed_count
+#         )
+    
+#     return filtered
 
 
 # # -----------------------------------------------------------------------
@@ -121,7 +180,12 @@
 #         df = df[list(columns)]
 
 #         logger.warning("Using Excel backup (%d rows loaded)", len(df))
-#         return df.to_dict(orient="records")
+        
+#         # Filter excluded facilities before returning
+#         rows = df.to_dict(orient="records")
+#         rows = _filter_excluded_facilities(rows)
+        
+#         return rows
 
 #     except Exception:
 #         logger.exception("Failed loading Excel backup")
@@ -139,6 +203,9 @@
 #     """
 #     Returns rows from the warehouse, or from Excel if the warehouse is
 #     unreachable.  Never raises — always returns a (possibly empty) list.
+    
+#     Filters out rows from excluded facilities (by FACILITY_NAME) before
+#     returning, regardless of source (warehouse or Excel backup).
 #     """
 #     sql = "SELECT {} FROM {}".format(
 #         ", ".join(f"[{c}]" for c in columns),
@@ -158,12 +225,15 @@
 #                 rows.extend(dict(zip(col_names, row)) for row in batch)
 
 #         logger.info("Warehouse fetch OK: %d rows", len(rows))
+        
+#         # Filter excluded facilities before returning
+#         rows = _filter_excluded_facilities(rows)
+        
 #         return rows
 
 #     except Exception:
 #         logger.warning("Warehouse fetch failed — switching to Excel backup")
 #         return fetch_backup_excel(columns)
-
 
 
 
@@ -194,6 +264,7 @@ WAREHOUSE_COLUMNS = (
 FACILITIES_TO_REMOVE = {
     "15077",   # Longisa County Referral Hospital
     "19543",   # THE MATER HOSPITAL (WESTLANDS)
+    "2",
     "13098",   # MP SHAH HOSPITAL (WESTLANDS)
     "25582",   # THE NAIROBI HOSPITAL (CAPITAL CENTRE)
     "99999",   # LIMS TEST FACILITY
@@ -201,7 +272,14 @@ FACILITIES_TO_REMOVE = {
     "12345",   # Kiseuni Dispensary
     "25412",   # Ammusait General Hospital
     "13359",   # HAGADERA HOSPITAL
+    "2",
 }
+
+# ---------------------------------------------------------------------------
+# Master switch — set to True to query the live warehouse,
+# False to read directly from the Excel backup (fast path, no DB required).
+# ---------------------------------------------------------------------------
+CONNECT_TO_WAREHOUSE: bool = False
 
 _WRITE_RE = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|MERGE)\b", re.I
@@ -322,34 +400,55 @@ def get_warehouse_cursor(timeout_seconds: int = 2):
 # -----------------------------------------------------------------------
 
 def fetch_backup_excel(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
+    """
+    Read backup.xlsx as fast as possible.
+
+    Fast path  — tries calamine (rust-based, ~5-10x faster than openpyxl).
+    Slow path  — falls back to openpyxl if calamine is not installed.
+    Both paths skip unused columns and avoid a full in-memory copy by
+    converting only the needed columns directly to records.
+    """
     try:
         if not BACKUP_FILE.exists():
             logger.error("Backup file not found: %s", BACKUP_FILE)
             return []
 
-        # read header first to validate columns
-        df_preview = pd.read_excel(BACKUP_FILE, nrows=0, engine="openpyxl")
-        excel_cols = list(df_preview.columns)
+        # ---- choose the fastest available engine ----
+        # calamine (python-calamine) is a Rust-backed reader; install with:
+        #   pip install python-calamine
+        # It is read-only and does not evaluate formulae, which is fine here.
+        try:
+            import python_calamine  # noqa: F401 — presence check only
+            engine = "calamine"
+        except ImportError:
+            engine = "openpyxl"
 
-        valid_cols = [c for c in columns if c in excel_cols]
+        # Read header row only to identify which requested columns exist
+        df_preview = pd.read_excel(BACKUP_FILE, nrows=0, engine=engine)
+        excel_cols = set(df_preview.columns)
+
+        valid_cols   = [c for c in columns if c in excel_cols]
         missing_cols = [c for c in columns if c not in excel_cols]
 
         if missing_cols:
             logger.warning("Missing columns in backup.xlsx: %s", missing_cols)
 
-        df = pd.read_excel(BACKUP_FILE, usecols=valid_cols, engine="openpyxl")
+        # Read only the columns we need — reduces I/O and memory
+        df = pd.read_excel(BACKUP_FILE, usecols=valid_cols, engine=engine)
 
+        # Re-order / add missing columns as None
         for col in missing_cols:
             df[col] = None
-
         df = df[list(columns)]
 
-        logger.warning("Using Excel backup (%d rows loaded)", len(df))
-        
+        logger.warning(
+            "Using Excel backup via %s engine (%d rows loaded)", engine, len(df)
+        )
+
         # Filter excluded facilities before returning
         rows = df.to_dict(orient="records")
         rows = _filter_excluded_facilities(rows)
-        
+
         return rows
 
     except Exception:
@@ -371,7 +470,16 @@ def fetch_warehouse_data(
     
     Filters out rows from excluded facilities (by FACILITY_NAME) before
     returning, regardless of source (warehouse or Excel backup).
+
+    When CONNECT_TO_WAREHOUSE is False the live DB is never contacted and
+    the Excel backup is read immediately (fast path).
     """
+    if not CONNECT_TO_WAREHOUSE:
+        logger.info(
+            "CONNECT_TO_WAREHOUSE=False — reading directly from Excel backup."
+        )
+        return fetch_backup_excel(columns)
+
     sql = "SELECT {} FROM {}".format(
         ", ".join(f"[{c}]" for c in columns),
         _table(),

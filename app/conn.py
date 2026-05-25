@@ -263,8 +263,9 @@ WAREHOUSE_COLUMNS = (
 # Facilities to remove (by use code)
 FACILITIES_TO_REMOVE = {
     "15077",   # Longisa County Referral Hospital
-    "19543",   # THE MATER HOSPITAL (WESTLANDS)
+    # "19543",   # THE MATER HOSPITAL (WESTLANDS)
     "2",
+    "12004",   # "Embu Level 5 Hospital",
     "13098",   # MP SHAH HOSPITAL (WESTLANDS)
     "25582",   # THE NAIROBI HOSPITAL (CAPITAL CENTRE)
     "99999",   # LIMS TEST FACILITY
@@ -395,9 +396,6 @@ def get_warehouse_cursor(timeout_seconds: int = 2):
             pass
 
 
-# -----------------------------------------------------------------------
-# Excel fallback
-# -----------------------------------------------------------------------
 
 def fetch_backup_excel(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
     """
@@ -454,11 +452,6 @@ def fetch_backup_excel(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
     except Exception:
         logger.exception("Failed loading Excel backup")
         return []
-
-
-# -----------------------------------------------------------------------
-# Main entry point
-# -----------------------------------------------------------------------
 
 def fetch_warehouse_data(
     columns: tuple = WAREHOUSE_COLUMNS,

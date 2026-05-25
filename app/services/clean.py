@@ -35,7 +35,7 @@ FACILITY_MAP: dict[str, str] = {
     "15828": "Bungoma County Referral Hospital",
     "15834": "Busia County Referral Hospital",
     "11289": "Coast General Teaching and Referral Hospital",
-    "12004": "Embu Level 5 Hospital",
+    # "12004": "Embu Level 5 Hospital",
     "13939": "Jaramogi Oginga Odinga Teaching & Referral Hospital",
     "15915": "Kakamega County General Hospital",
     "13023": "Kenyatta National Hospital",

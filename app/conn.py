@@ -267,7 +267,7 @@ FACILITIES_TO_REMOVE = {
     "2",
     "12004",   # "Embu Level 5 Hospital",
     # "13098",   # MP SHAH HOSPITAL (WESTLANDS)
-    "25582",   # THE NAIROBI HOSPITAL (CAPITAL CENTRE)
+    # "25582",   # THE NAIROBI HOSPITAL (CAPITAL CENTRE)
     "99999",   # LIMS TEST FACILITY
     "13240",   # Umoja Health Centre
     "12345",   # Kiseuni Dispensary

@@ -59,7 +59,7 @@ FACILITY_MAP: dict[str, str] = {
     "15077": "Longisa County Referral  Hospital",
     "19543": "The Mater Hospital",
     "13098": "MP Shah Hospital",
-    "25582" : "The Nairobi Hospital(Capital Centre)",
+    "25582" : "The Nairobi Hospital",
     "99999": "LIMS TEST FACILITY",
     "13240": "Umoja Health Centre",
     "12345": "Kiseuni Dispensary",

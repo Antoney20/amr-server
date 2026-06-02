@@ -274,6 +274,7 @@ FACILITIES_TO_REMOVE = {
     "25412",   # Ammusait General Hospital
     "13359",   # HAGADERA HOSPITAL
     "2",
+    "15834" , # "15834": "Busia County Referral Hospital",
 }
 
 # ---------------------------------------------------------------------------

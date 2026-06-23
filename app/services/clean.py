@@ -321,6 +321,8 @@ ORGANISM_TEXT_MAP: dict[str, str] = {
     "e. coli": "Escherichia coli",
     "escherichia coli": "Escherichia coli",
     "ec": "Escherichia coli",
+    "Escherichia Coli Species":"Escherichia coli",
+    "Escherichia Coli 0157:H7": "Escherichia coli",
     # Klebsiella
     "klebsiella": "Klebsiella pneumoniae",
     "klebsiella pneumoniae": "Klebsiella pneumoniae",
@@ -342,6 +344,10 @@ ORGANISM_TEXT_MAP: dict[str, str] = {
     # Proteus
     "proteus": "Proteus mirabilis",
     "proteus mirabilis": "Proteus mirabilis",
+    
+    # 
+    "Candida Species" : "Candida sp.",
+    
     
 
     # Organism codes -latest

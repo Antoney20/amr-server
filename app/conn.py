@@ -1,5 +1,3 @@
-
-
 # """
 # conn.py — Warehouse DB cursor with Excel fallback.
 # Never raises outside fetch_warehouse_data(); always falls back gracefully.
@@ -26,17 +24,25 @@
 # # Facilities to remove (by use code)
 # FACILITIES_TO_REMOVE = {
 #     "15077",   # Longisa County Referral Hospital
-#     "19543",   # THE MATER HOSPITAL (WESTLANDS)
+#     # "19543",   # THE MATER HOSPITAL (WESTLANDS)
 #     "2",
-#     "13098",   # MP SHAH HOSPITAL (WESTLANDS)
-#     "25582",   # THE NAIROBI HOSPITAL (CAPITAL CENTRE)
+#     "12004",   # "Embu Level 5 Hospital",
+#     # "13098",   # MP SHAH HOSPITAL (WESTLANDS)
+#     # "25582",   # THE NAIROBI HOSPITAL (CAPITAL CENTRE)
 #     "99999",   # LIMS TEST FACILITY
 #     "13240",   # Umoja Health Centre
 #     "12345",   # Kiseuni Dispensary
 #     "25412",   # Ammusait General Hospital
 #     "13359",   # HAGADERA HOSPITAL
 #     "2",
+#     "15834" , # "15834": "Busia County Referral Hospital",
 # }
+
+# # ---------------------------------------------------------------------------
+# # Master switch — set to True to query the live warehouse,
+# # False to read directly from the Excel backup (fast path, no DB required).
+# # ---------------------------------------------------------------------------
+# CONNECT_TO_WAREHOUSE: bool = False
 
 # _WRITE_RE = re.compile(
 #     r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|MERGE)\b", re.I
@@ -152,49 +158,62 @@
 #             pass
 
 
-# # -----------------------------------------------------------------------
-# # Excel fallback
-# # -----------------------------------------------------------------------
 
 # def fetch_backup_excel(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
+#     """
+#     Read backup.xlsx as fast as possible.
+
+#     Fast path  — tries calamine (rust-based, ~5-10x faster than openpyxl).
+#     Slow path  — falls back to openpyxl if calamine is not installed.
+#     Both paths skip unused columns and avoid a full in-memory copy by
+#     converting only the needed columns directly to records.
+#     """
 #     try:
 #         if not BACKUP_FILE.exists():
 #             logger.error("Backup file not found: %s", BACKUP_FILE)
 #             return []
 
-#         # read header first to validate columns
-#         df_preview = pd.read_excel(BACKUP_FILE, nrows=0, engine="openpyxl")
-#         excel_cols = list(df_preview.columns)
+#         # ---- choose the fastest available engine ----
+#         # calamine (python-calamine) is a Rust-backed reader; install with:
+#         #   pip install python-calamine
+#         # It is read-only and does not evaluate formulae, which is fine here.
+#         try:
+#             import python_calamine  # noqa: F401 — presence check only
+#             engine = "calamine"
+#         except ImportError:
+#             engine = "openpyxl"
 
-#         valid_cols = [c for c in columns if c in excel_cols]
+#         # Read header row only to identify which requested columns exist
+#         df_preview = pd.read_excel(BACKUP_FILE, nrows=0, engine=engine)
+#         excel_cols = set(df_preview.columns)
+
+#         valid_cols   = [c for c in columns if c in excel_cols]
 #         missing_cols = [c for c in columns if c not in excel_cols]
 
 #         if missing_cols:
 #             logger.warning("Missing columns in backup.xlsx: %s", missing_cols)
 
-#         df = pd.read_excel(BACKUP_FILE, usecols=valid_cols, engine="openpyxl")
+#         # Read only the columns we need — reduces I/O and memory
+#         df = pd.read_excel(BACKUP_FILE, usecols=valid_cols, engine=engine)
 
+#         # Re-order / add missing columns as None
 #         for col in missing_cols:
 #             df[col] = None
-
 #         df = df[list(columns)]
 
-#         logger.warning("Using Excel backup (%d rows loaded)", len(df))
-        
+#         logger.warning(
+#             "Using Excel backup via %s engine (%d rows loaded)", engine, len(df)
+#         )
+
 #         # Filter excluded facilities before returning
 #         rows = df.to_dict(orient="records")
 #         rows = _filter_excluded_facilities(rows)
-        
+
 #         return rows
 
 #     except Exception:
 #         logger.exception("Failed loading Excel backup")
 #         return []
-
-
-# # -----------------------------------------------------------------------
-# # Main entry point
-# # -----------------------------------------------------------------------
 
 # def fetch_warehouse_data(
 #     columns: tuple = WAREHOUSE_COLUMNS,
@@ -206,7 +225,16 @@
     
 #     Filters out rows from excluded facilities (by FACILITY_NAME) before
 #     returning, regardless of source (warehouse or Excel backup).
+
+#     When CONNECT_TO_WAREHOUSE is False the live DB is never contacted and
+#     the Excel backup is read immediately (fast path).
 #     """
+#     if not CONNECT_TO_WAREHOUSE:
+#         logger.info(
+#             "CONNECT_TO_WAREHOUSE=False — reading directly from Excel backup."
+#         )
+#         return fetch_backup_excel(columns)
+
 #     sql = "SELECT {} FROM {}".format(
 #         ", ".join(f"[{c}]" for c in columns),
 #         _table(),
@@ -235,10 +263,8 @@
 #         logger.warning("Warehouse fetch failed — switching to Excel backup")
 #         return fetch_backup_excel(columns)
 
-
-
 """
-conn.py — Warehouse DB cursor with Excel fallback.
+conn.py — Warehouse DB cursor with CSV fallback.
 Never raises outside fetch_warehouse_data(); always falls back gracefully.
 """
 
@@ -252,7 +278,7 @@ from django.db import connections, DatabaseError, OperationalError
 
 logger = logging.getLogger(__name__)
 
-BACKUP_FILE = Path(__file__).resolve().parent / "data" / "backup.xlsx"
+BACKUP_FILE = Path(__file__).resolve().parent / "data" / "backup.csv"
 
 WAREHOUSE_COLUMNS = (
     "GENDER", "SPECIMEN_SOURCE", "FACILITY_NAME", "COLLECTION_DATE",
@@ -279,7 +305,7 @@ FACILITIES_TO_REMOVE = {
 
 # ---------------------------------------------------------------------------
 # Master switch — set to True to query the live warehouse,
-# False to read directly from the Excel backup (fast path, no DB required).
+# False to read directly from the CSV backup (fast path, no DB required).
 # ---------------------------------------------------------------------------
 CONNECT_TO_WAREHOUSE: bool = False
 
@@ -314,7 +340,7 @@ def _filter_excluded_facilities(rows: list[dict]) -> list[dict]:
     Filter out rows from excluded facilities by USE_CODE.
     
     Args:
-        rows: List of warehouse/Excel rows.
+        rows: List of warehouse/CSV rows.
     
     Returns:
         Filtered list excluding rows with use codes in FACILITIES_TO_REMOVE.
@@ -344,7 +370,7 @@ def get_warehouse_cursor(timeout_seconds: int = 2):
     """
     Yields a live pyodbc cursor pointed at the warehouse.
     Raises OperationalError / DatabaseError on failure — caller decides
-    what to do (fetch_warehouse_data falls back to Excel).
+    what to do (fetch_warehouse_data falls back to CSV).
 
     KEY CHANGE: we do NOT call conn.ensure_connection() explicitly.
     Django does that lazily when we call conn.cursor(), so management
@@ -398,42 +424,41 @@ def get_warehouse_cursor(timeout_seconds: int = 2):
 
 
 
-def fetch_backup_excel(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
+def fetch_backup_csv(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
     """
-    Read backup.xlsx as fast as possible.
+    Read backup.csv as fast as possible.
 
-    Fast path  — tries calamine (rust-based, ~5-10x faster than openpyxl).
-    Slow path  — falls back to openpyxl if calamine is not installed.
-    Both paths skip unused columns and avoid a full in-memory copy by
-    converting only the needed columns directly to records.
+    Fast path — tries the pyarrow engine (multi-threaded, C++-backed,
+                ~2-10x faster than the default parser on large files).
+    Slow path — falls back to pandas' default C engine.
+    Only the requested columns are read, which cuts both I/O and memory.
     """
     try:
         if not BACKUP_FILE.exists():
             logger.error("Backup file not found: %s", BACKUP_FILE)
             return []
 
-        # ---- choose the fastest available engine ----
-        # calamine (python-calamine) is a Rust-backed reader; install with:
-        #   pip install python-calamine
-        # It is read-only and does not evaluate formulae, which is fine here.
-        try:
-            import python_calamine  # noqa: F401 — presence check only
-            engine = "calamine"
-        except ImportError:
-            engine = "openpyxl"
+        # Read the header row only to identify which requested columns exist.
+        # Use the default engine here — nrows is always supported on it.
+        df_preview = pd.read_csv(BACKUP_FILE, nrows=0)
+        csv_cols = set(df_preview.columns)
 
-        # Read header row only to identify which requested columns exist
-        df_preview = pd.read_excel(BACKUP_FILE, nrows=0, engine=engine)
-        excel_cols = set(df_preview.columns)
-
-        valid_cols   = [c for c in columns if c in excel_cols]
-        missing_cols = [c for c in columns if c not in excel_cols]
+        valid_cols   = [c for c in columns if c in csv_cols]
+        missing_cols = [c for c in columns if c not in csv_cols]
 
         if missing_cols:
-            logger.warning("Missing columns in backup.xlsx: %s", missing_cols)
+            logger.warning("Missing columns in backup.csv: %s", missing_cols)
 
-        # Read only the columns we need — reduces I/O and memory
-        df = pd.read_excel(BACKUP_FILE, usecols=valid_cols, engine=engine)
+        # ---- choose the fastest available engine for the full read ----
+        # pyarrow (pip install pyarrow) gives a big speedup on large files.
+        try:
+            import pyarrow  
+            engine = "pyarrow"
+        except ImportError:
+            engine = "c"
+
+        # Read only the columns we need
+        df = pd.read_csv(BACKUP_FILE, usecols=valid_cols, engine=engine)
 
         # Re-order / add missing columns as None
         for col in missing_cols:
@@ -441,7 +466,7 @@ def fetch_backup_excel(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
         df = df[list(columns)]
 
         logger.warning(
-            "Using Excel backup via %s engine (%d rows loaded)", engine, len(df)
+            "Using CSV backup via %s engine (%d rows loaded)", engine, len(df)
         )
 
         # Filter excluded facilities before returning
@@ -451,7 +476,7 @@ def fetch_backup_excel(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
         return rows
 
     except Exception:
-        logger.exception("Failed loading Excel backup")
+        logger.exception("Failed loading CSV backup")
         return []
 
 def fetch_warehouse_data(
@@ -459,20 +484,20 @@ def fetch_warehouse_data(
     batch_size: int = 10_000,
 ) -> list[dict]:
     """
-    Returns rows from the warehouse, or from Excel if the warehouse is
+    Returns rows from the warehouse, or from CSV if the warehouse is
     unreachable.  Never raises — always returns a (possibly empty) list.
     
     Filters out rows from excluded facilities (by FACILITY_NAME) before
-    returning, regardless of source (warehouse or Excel backup).
+    returning, regardless of source (warehouse or CSV backup).
 
     When CONNECT_TO_WAREHOUSE is False the live DB is never contacted and
-    the Excel backup is read immediately (fast path).
+    the CSV backup is read immediately (fast path).
     """
     if not CONNECT_TO_WAREHOUSE:
         logger.info(
-            "CONNECT_TO_WAREHOUSE=False — reading directly from Excel backup."
+            "CONNECT_TO_WAREHOUSE=False — reading directly from CSV backup."
         )
-        return fetch_backup_excel(columns)
+        return fetch_backup_csv(columns)
 
     sql = "SELECT {} FROM {}".format(
         ", ".join(f"[{c}]" for c in columns),
@@ -499,5 +524,5 @@ def fetch_warehouse_data(
         return rows
 
     except Exception:
-        logger.warning("Warehouse fetch failed — switching to Excel backup")
-        return fetch_backup_excel(columns)
+        logger.warning("Warehouse fetch failed — switching to CSV backup")
+        return fetch_backup_csv(columns)

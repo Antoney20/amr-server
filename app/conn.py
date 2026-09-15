@@ -450,15 +450,24 @@ def fetch_backup_csv(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
             logger.warning("Missing columns in backup.csv: %s", missing_cols)
 
         # ---- choose the fastest available engine for the full read ----
-        # pyarrow (pip install pyarrow) gives a big speedup on large files.
+        # pyarrow (pip install pyarrow) gives a big speedup on large files
+        # and sidesteps the C-parser usecols/mixed-dtype chunking bug.
         try:
-            import pyarrow  
+            import pyarrow  # noqa: F401
             engine = "pyarrow"
         except ImportError:
             engine = "c"
 
-        # Read only the columns we need
-        df = pd.read_csv(BACKUP_FILE, usecols=valid_cols, engine=engine)
+        # Read only the columns we need.
+        read_kwargs = {"usecols": valid_cols, "engine": engine}
+        if engine == "c":
+            # low_memory=False forces a single-pass read, avoiding
+            # _concatenate_chunks -> IndexError when usecols is combined
+            # with a column whose dtype is inferred differently per chunk.
+            # (low_memory is C-engine-only; pyarrow rejects the kwarg.)
+            read_kwargs["low_memory"] = False
+
+        df = pd.read_csv(BACKUP_FILE, **read_kwargs)
 
         # Re-order / add missing columns as None
         for col in missing_cols:
@@ -478,6 +487,7 @@ def fetch_backup_csv(columns: tuple = WAREHOUSE_COLUMNS) -> list[dict]:
     except Exception:
         logger.exception("Failed loading CSV backup")
         return []
+
 
 def fetch_warehouse_data(
     columns: tuple = WAREHOUSE_COLUMNS,

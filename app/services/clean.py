@@ -63,8 +63,8 @@ FACILITY_MAP: dict[str, str] = {
     "99999": "LIMS TEST FACILITY",
     "13240": "Umoja Health Centre",
     "12345": "Kiseuni Dispensary",
-    "25412": "Ammusait General Hospital",
-    "13359": "Hagadera Hospital", 
+    "25412": "Kakuma",
+    "13359": "IRC Dadaab", 
 }
 
 # ---------------------------------------------------------------------------
@@ -119,6 +119,9 @@ FACILITY_COUNTY_MAP: dict[str, str] = {
     "Kiambu County Referal Hospital":                   "Kiambu",
     "Busia County Referral Hospital":                   "Busia",
     "Mater Misericordiae Hospital" :                               "Nairobi",
+    "IRC Dadaab" : "Garissa",
+    "Kakuma": "Turkana",
+    
     
 }
 

@@ -297,9 +297,10 @@ FACILITIES_TO_REMOVE = {
     "99999",   # LIMS TEST FACILITY
     "13240",   # Umoja Health Centre
     "12345",   # Kiseuni Dispensary
-    "25412",   # Ammusait General Hospital
-    "13359",   # HAGADERA HOSPITAL
+    # "25412",   # Ammusait General Hospital - Kakuma 
+    # "13359",   # HAGADERA HOSPITAL - IRC Dadaab
     "2",
+    "0",
     "15834" , # "15834": "Busia County Referral Hospital",
 }
 
